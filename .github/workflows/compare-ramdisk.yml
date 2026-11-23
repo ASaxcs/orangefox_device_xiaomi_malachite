@@ -1,0 +1,57 @@
+name: Compare Vendor Boot Ramdisks (Built vs Stock)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Download built vendor_boot.img from Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/cmp/built /tmp/cmp/stock
+          gh release download OFRP-R12.0-malachite-HOS3.0.303-A16 \
+            --repo "${{ github.repository }}" \
+            --pattern vendor_boot.img \
+            --dir /tmp/cmp/built --clobber
+          echo "fe0ab92e4609e1d473e2b1040b552b587bb42013ac779e902d46c875061d2b83  /tmp/cmp/built/vendor_boot.img" | sha256sum -c -
+
+      - name: Extract stock vendor_boot.img (OS3.0.303.0.WOOIDXM)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download --repo rhythmcache/payload-dumper-rust \
+            --pattern "payload_dumper-linux-x86_64.zip" \
+            --dir /tmp/pdr --clobber
+          unzip -q /tmp/pdr/payload_dumper-linux-x86_64.zip -d /tmp/pdr/bin
+          PDR_BIN=$(find /tmp/pdr/bin -type f -name "*payload*" | head -n1)
+          chmod +x "$PDR_BIN"
+          "$PDR_BIN" --partitions vendor_boot --out /tmp/cmp/stock \
+            "https://cdnorg.d.miui.com/OS3.0.303.0.WOOIDXM/malachite_id_global-ota_full-OS3.0.303.0.WOOIDXM-user-16.0-7fdae8050e.zip"
+          echo "d38ed79631c06d37389c3760598e17fcad4b82b509f3fa16423749494723295d  /tmp/cmp/stock/vendor_boot.img" | sha256sum -c -
+
+      - name: Run compare_ramdisks.py and print report
+        run: |
+          set +e
+          python3 scripts/compare_ramdisks.py /tmp/cmp/built/vendor_boot.img /tmp/cmp/stock/vendor_boot.img /tmp/cmp/ramdisk-comparison.md
+          RC=$?
+          echo "COMPARE_EXIT_CODE=$RC"
+          echo "=== BEGIN RAMDISK COMPARISON ==="
+          cat /tmp/cmp/ramdisk-comparison.md
+          echo "=== END RAMDISK COMPARISON ==="
+          exit 0
+
+      - name: Upload comparison report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ramdisk-comparison
+          path: /tmp/cmp/ramdisk-comparison.md
+          retention-days: 7
