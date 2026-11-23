@@ -94,6 +94,16 @@ jobs:
             "$WORKDIR/bootable/recovery" \
             "$WORKDIR/device/xiaomi/malachite/patches/0001-minuitwrp-skip-unavailable-aidl-haptics.patch"
 
+      - name: Tambah 16GB swapfile untuk mencegah OOM saat Soong build
+        run: |
+          free -h
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          df -h "$WORKDIR"
+
       - name: Compile OrangeFox vendor_boot.img & ZIP
         env:
           PERM: ${{ inputs.selinux_permissive }}
@@ -102,6 +112,8 @@ jobs:
           cd "$WORKDIR"
           export ALLOW_MISSING_DEPENDENCIES=true
           export LC_ALL=C
+          export GOGC=50
+          export _JAVA_OPTIONS="-Xmx4g"
           if [ "$PERM" = "true" ]; then
             export MALACHITE_RECOVERY_PERMISSIVE=true
           fi
