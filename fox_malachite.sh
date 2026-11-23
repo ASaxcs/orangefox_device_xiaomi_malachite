@@ -2,13 +2,13 @@
 # OrangeFox fox_14.1 build environment variables for Xiaomi Redmi Note 14 Pro 5G (malachite)
 
 export FOX_BUILD_DEVICE="malachite"
-export OF_TARGET_DEVICES="malachite,malachite_id_global"
+export FOX_TARGET_DEVICES="malachite,malachite_id_global"
 export OF_MAINTAINER="ASaxcs"
 export FOX_VARIANT="HOS3_A16"
 export FOX_BUILD_TYPE="Unofficial"
 
 # Virtual A/B & vendor_boot recovery
-export OF_AB_DEVICE=1
+export FOX_AB_DEVICE=1
 export FOX_VIRTUAL_AB_DEVICE=1
 export FOX_VENDOR_BOOT_RECOVERY=1
 export OF_USE_LZ4_COMPRESSION=1

@@ -215,7 +215,7 @@ TW_CUSTOM_CPU_TEMP_PATH := "/sys/class/thermal/thermal_zone7/temp"
 TW_BATTERY_SYSFS_WAIT_SECONDS := 6
 
 # OrangeFox Recovery (fox_14.1) Configuration
-OF_AB_DEVICE := 1
+FOX_AB_DEVICE := 1
 FOX_VIRTUAL_AB_DEVICE := 1
 FOX_VENDOR_BOOT_RECOVERY := 1
 OF_USE_LZ4_COMPRESSION := 1
