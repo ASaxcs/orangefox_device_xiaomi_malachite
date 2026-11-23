@@ -151,10 +151,10 @@ jobs:
           TAG: ${{ inputs.release_tag }}
         run: |
           set -euxo pipefail
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" release_out/* --clobber
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$TAG" release_out/* --repo "${{ github.repository }}" --clobber
           else
-            gh release create "$TAG" release_out/* \
+            gh release create "$TAG" release_out/* --repo "${{ github.repository }}" \
               --title "OrangeFox R12.0 — Redmi Note 14 Pro 5G (malachite) HOS 3.0.303 A16" \
               --notes "Built from OrangeFox fox_14.1 for Redmi Note 14 Pro 5G / POCO X7 (malachite), HyperOS OS3.0.303.0.WOOIDXM (Indonesia, Android 16, kernel 6.1.138)."
           fi
