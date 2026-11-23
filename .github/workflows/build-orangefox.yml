@@ -51,6 +51,16 @@ jobs:
           echo "WORKDIR=$WORKDIR" >> "$GITHUB_ENV"
           echo "Selected WORKDIR=$WORKDIR"
 
+      - name: Tambah 16GB swapfile (/swapfile_build) untuk mencegah OOM saat Soong build
+        run: |
+          free -h
+          sudo fallocate -l 16G /swapfile_build
+          sudo chmod 600 /swapfile_build
+          sudo mkswap /swapfile_build
+          sudo swapon /swapfile_build
+          free -h
+          df -h "$WORKDIR"
+
       - name: Install dependensi build OrangeFox (fox_14.1)
         run: |
           sudo apt-get update
@@ -93,16 +103,6 @@ jobs:
           python3 "$WORKDIR/device/xiaomi/malachite/patches/apply_haptics_patch.py" \
             "$WORKDIR/bootable/recovery" \
             "$WORKDIR/device/xiaomi/malachite/patches/0001-minuitwrp-skip-unavailable-aidl-haptics.patch"
-
-      - name: Tambah 16GB swapfile untuk mencegah OOM saat Soong build
-        run: |
-          free -h
-          sudo fallocate -l 16G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          free -h
-          df -h "$WORKDIR"
 
       - name: Compile OrangeFox vendor_boot.img & ZIP
         env:
