@@ -1,0 +1,79 @@
+name: Repack & Verify 2-Fragment vendor_boot v4
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "GitHub Release Tag to upload vendor_boot_2frag.img"
+        type: string
+        default: "OFRP-R12.0-malachite-HOS3.0.303-A16"
+
+permissions:
+  contents: write
+
+jobs:
+  repack:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install lz4 & cpio
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends lz4 cpio
+
+      - name: Download built OrangeFox vendor_boot.img & extract stock OS3.0.303.0.WOOIDXM vendor_boot.img
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/v4/built /tmp/v4/stock /tmp/v4/out
+          gh release download "${{ inputs.release_tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern vendor_boot.img \
+            --dir /tmp/v4/built --clobber
+          echo "fe0ab92e4609e1d473e2b1040b552b587bb42013ac779e902d46c875061d2b83  /tmp/v4/built/vendor_boot.img" | sha256sum -c -
+
+          gh release download --repo rhythmcache/payload-dumper-rust \
+            --pattern "payload_dumper-linux-x86_64.zip" \
+            --dir /tmp/pdr --clobber
+          unzip -q /tmp/pdr/payload_dumper-linux-x86_64.zip -d /tmp/pdr/bin
+          PDR_BIN=$(find /tmp/pdr/bin -type f -name "*payload*" | head -n1)
+          chmod +x "$PDR_BIN"
+          "$PDR_BIN" --partitions vendor_boot --out /tmp/v4/stock \
+            "https://cdnorg.d.miui.com/OS3.0.303.0.WOOIDXM/malachite_id_global-ota_full-OS3.0.303.0.WOOIDXM-user-16.0-7fdae8050e.zip"
+          echo "d38ed79631c06d37389c3760598e17fcad4b82b509f3fa16423749494723295d  /tmp/v4/stock/vendor_boot.img" | sha256sum -c -
+
+      - name: Repack into 2-fragment vendor_boot v4 (Stock PLATFORM + OrangeFox RECOVERY)
+        run: |
+          python3 scripts/repack_vendor_boot_v4.py \
+            /tmp/v4/stock/vendor_boot.img \
+            /tmp/v4/built/vendor_boot.img \
+            /tmp/v4/out/vendor_boot_2frag.img \
+            lz4 12
+
+      - name: Verify 2-fragment image & run compare_ramdisks.py
+        run: |
+          python3 scripts/verify_v4_2frag.py \
+            /tmp/v4/out/vendor_boot_2frag.img \
+            /tmp/v4/stock/vendor_boot.img \
+            /tmp/v4/built/vendor_boot.img
+          set +e
+          python3 scripts/compare_ramdisks.py \
+            /tmp/v4/out/vendor_boot_2frag.img \
+            /tmp/v4/stock/vendor_boot.img \
+            /tmp/v4/out/ramdisk-comparison-2frag.md
+          echo "COMPARE_EXIT_CODE=$?"
+          head -n 80 /tmp/v4/out/ramdisk-comparison-2frag.md
+          tail -n 50 /tmp/v4/out/ramdisk-comparison-2frag.md
+
+      - name: Upload vendor_boot_2frag.img & SHA256 to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          cd /tmp/v4/out
+          sha256sum vendor_boot_2frag.img > vendor_boot_2frag.sha256
+          cat vendor_boot_2frag.sha256
+          gh release upload "$TAG" vendor_boot_2frag.img vendor_boot_2frag.sha256 ramdisk-comparison-2frag.md \
+            --repo "${{ github.repository }}" --clobber
