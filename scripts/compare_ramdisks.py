@@ -1,14 +1,30 @@
 #!/usr/bin/env python3
 """Compare vendor_boot v4 ramdisk fragments between built OrangeFox and stock OS3.0.303.0.WOOIDXM."""
 import difflib
+import gzip
 import hashlib
 import os
 import re
 import struct
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from extract_lz4_cpio import decompress_lz4_legacy, iter_cpio
+
+
+def decompress_ramdisk_fragment(frag_bytes: bytes, label: str) -> tuple[bytes, str]:
+    """Decompress a vendor_boot v4 ramdisk fragment (LZ4 legacy, or 0x00* + ZSTD/GZIP)."""
+    trimmed = frag_bytes.lstrip(b"\x00")
+    leading_zeros = len(frag_bytes) - len(trimmed)
+    if trimmed[:4] == b"\x02\x21\x4c\x18":
+        return decompress_lz4_legacy(trimmed), "lz4-legacy"
+    if trimmed[:4] == b"\x28\xb5\x2f\xfd":
+        proc = subprocess.run(["zstd", "-dc"], input=trimmed, capture_output=True, check=True)
+        return proc.stdout, f"0x00*{leading_zeros}+zstd"
+    if trimmed[:2] == b"\x1f\x8b":
+        return gzip.decompress(trimmed), f"0x00*{leading_zeros}+gzip"
+    raise ValueError(f"{label}: unsupported fragment magic {trimmed[:4].hex()}")
 
 RAMDISK_TYPES = {
     0: "NONE",
@@ -81,12 +97,7 @@ def parse_v4_fragments(img_path: str) -> tuple[dict, list[dict]]:
                 f"{img_path}: fragment[{idx}] ({frag_name}) range {frag_off}+{frag_size} exceeds vendor_ramdisk_size {len(ramdisk_blob)}"
             )
         frag_bytes = ramdisk_blob[frag_off : frag_off + frag_size]
-        magic = frag_bytes[:4]
-        if magic != b"\x02\x21\x4c\x18":
-            raise ValueError(
-                f"{img_path}: fragment[{idx}] ({frag_name}) uses non-lz4-legacy magic {magic.hex()}"
-            )
-        cpio_bytes = decompress_lz4_legacy(frag_bytes)
+        cpio_bytes, codec_name = decompress_ramdisk_fragment(frag_bytes, f"{img_path}:fragment[{idx}]({frag_name})")
         entries: dict[str, tuple[int, str, int, bytes]] = {}
         for path, mode, content in iter_cpio(cpio_bytes):
             norm = path.lstrip("/")
@@ -99,6 +110,7 @@ def parse_v4_fragments(img_path: str) -> tuple[dict, list[dict]]:
                 "name": frag_name,
                 "type": frag_type,
                 "type_name": RAMDISK_TYPES.get(frag_type, f"UNKNOWN({frag_type})"),
+                "codec": codec_name,
                 "compressed_size": frag_size,
                 "offset": frag_off,
                 "cpio_size": len(cpio_bytes),

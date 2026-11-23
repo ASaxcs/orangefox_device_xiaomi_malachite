@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Repack Android vendor_boot v4 image with 2 fragments:
-  - Fragment 0 (PLATFORM, name=''): 100% bit-for-bit stock OS3.0.303.0.WOOIDXM
-  - Fragment 1 (RECOVERY, name='recovery'): deduplicated OrangeFox recovery ramdisk + masks for conflicting stock .rc
+  - Fragment 0 (PLATFORM, name='', LZ4 legacy): 100% bit-for-bit stock OS3.0.303.0.WOOIDXM
+  - Fragment 1 (RECOVERY, name='recovery', 4-byte 0x00 LZ4-EOS + ZSTD -19):
+      deduplicated OrangeFox R12.0 recovery ramdisk (full UI/fonts/tools intact)
+      + masks for conflicting stock PLATFORM .rc/vintf files.
 """
 import hashlib
 import os
@@ -93,29 +95,55 @@ def build_cpio_entry(name: str, fields: dict, content: bytes) -> bytes:
         f"{len(name_bytes):08X}"
         "00000000"
     ).encode("ascii")
-    entry = pad_to(hdr + name_bytes, 4) + pad_to(content, 4)
-    return entry
+    return pad_to(hdr + name_bytes, 4) + pad_to(content, 4)
 
 
-def compress_lz4_legacy(raw_cpio: bytes, lz4_bin: str = "lz4", level: int = 12) -> bytes:
-    proc = subprocess.run(
-        [lz4_bin, "-l", f"-{level}", "--stdout", "-"],
-        input=raw_cpio,
-        capture_output=True,
-        check=True,
-    )
-    out = proc.stdout
-    if out[:4] != b"\x02\x21\x4c\x18":
-        raise ValueError(f"Unexpected LZ4 output magic: {out[:4].hex()}")
-    return out
+def compress_fragment(raw_cpio: bytes, codec: str = "zstd", level: int = 19) -> bytes:
+    if codec == "lz4":
+        proc = subprocess.run(
+            ["lz4", "-l", f"-{level}", "--stdout", "-"],
+            input=raw_cpio,
+            capture_output=True,
+            check=True,
+        )
+        out = proc.stdout
+        if out[:4] != b"\x02\x21\x4c\x18":
+            raise ValueError(f"Unexpected LZ4 output magic: {out[:4].hex()}")
+        return out
+    if codec == "zstd":
+        # Standard zstd (no --ultra, <= 8MiB window, compatible with Linux 6.1 CONFIG_RD_ZSTD=y).
+        # Prepend 4 zero bytes so Linux 6.1 lib/decompress_unlz4.c terminates Fragment 0 cleanly
+        # (chunksize == 0 -> goto exit_3) before init/initramfs.c skips zeros and invokes unzstd().
+        proc = subprocess.run(
+            ["zstd", f"-{level}", "-T0", "--stdout", "-"],
+            input=raw_cpio,
+            capture_output=True,
+            check=True,
+        )
+        out = proc.stdout
+        if out[:4] != b"\x28\xb5\x2f\xfd":
+            raise ValueError(f"Unexpected ZSTD output magic: {out[:4].hex()}")
+        return b"\x00\x00\x00\x00" + out
+    if codec == "gzip":
+        proc = subprocess.run(
+            ["gzip", f"-{level}", "-c"],
+            input=raw_cpio,
+            capture_output=True,
+            check=True,
+        )
+        out = proc.stdout
+        if out[:2] != b"\x1f\x8b":
+            raise ValueError(f"Unexpected GZIP output magic: {out[:2].hex()}")
+        return b"\x00\x00\x00\x00" + out
+    raise ValueError(f"Unsupported codec: {codec}")
 
 
 def repack_v4_two_fragment(
     stock_img: str,
     built_img: str,
     out_img: str,
-    lz4_bin: str = "lz4",
-    lz4_level: int = 12,
+    codec: str = "zstd",
+    level: int = 19,
     partition_size: int = 67108864,
 ) -> dict:
     with open(stock_img, "rb") as f:
@@ -126,7 +154,6 @@ def repack_v4_two_fragment(
     if s_data[:8] != b"VNDRBOOT" or b_data[:8] != b"VNDRBOOT":
         raise ValueError("Both images must have VNDRBOOT magic")
 
-    # Parse stock header & exact Fragment 0 (PLATFORM) bytes
     hver, page_size, kaddr, raddr, s_ramdisk_sz = struct.unpack_from("<IIIII", s_data, 8)
     cmdline_raw = s_data[28 : 28 + 2048]
     (tags_addr,) = struct.unpack_from("<I", s_data, 28 + 2048)
@@ -145,7 +172,7 @@ def repack_v4_two_fragment(
     dtb_bytes = s_data[s_dtb_off : s_dtb_off + dtb_size]
     bootconfig_bytes = s_data[s_bc_off : s_bc_off + bootconfig_size]
 
-    # Exact Stock Fragment 0 (PLATFORM) compressed blob & its entries for deduplication
+    # Exact Stock Fragment 0 (PLATFORM) compressed blob
     f0_size, f0_off, f0_type = struct.unpack_from("<III", s_data, s_tbl_off)
     f0_name_raw = s_data[s_tbl_off + 12 : s_tbl_off + 44]
     f0_board_id_raw = s_data[s_tbl_off + 44 : s_tbl_off + 108]
@@ -158,24 +185,22 @@ def repack_v4_two_fragment(
     f1_name_raw = s_data[s_tbl_off + s_entry_sz + 12 : s_tbl_off + s_entry_sz + 44]
     f1_board_id_raw = s_data[s_tbl_off + s_entry_sz + 44 : s_tbl_off + s_entry_sz + 108]
 
-    # Decompress stock f0 to build exact lookup of (mode, sha256) for deduplication
     s0_cpio = decompress_lz4_legacy(stock_f0_compressed)
     s0_map: dict[str, tuple[int, str]] = {}
     for p, mode, content in iter_cpio(s0_cpio):
         s0_map[p.lstrip("/")] = (mode, hashlib.sha256(content).hexdigest())
 
-    # Extract built OrangeFox ramdisk (Fragment 0 in single-fragment build)
+    # Extract built OrangeFox ramdisk
     _, b_ps, _, _, b_ramdisk_sz = struct.unpack_from("<IIIII", b_data, 8)
     b_hsz = struct.unpack_from("<I", b_data, 28 + 2048 + 20)[0]
     b_ramdisk_off = align(b_hsz, b_ps)
     b_ramdisk_comp = b_data[b_ramdisk_off : b_ramdisk_off + b_ramdisk_sz]
     b_cpio = decompress_lz4_legacy(b_ramdisk_comp)
 
-    # Build deduplicated RECOVERY CPIO (omit entries identical in path, mode, sha256 to s0)
-    # Keep directory entries as needed (tiny, 112 bytes each) so parent dirs always exist
     out_cpio = bytearray()
     kept_entries = 0
     skipped_identical = 0
+    skipped_first_stage = 0
     max_ino = 0
     emitted_paths: set[str] = set()
 
@@ -183,6 +208,10 @@ def repack_v4_two_fragment(
         norm = path.lstrip("/")
         if fields["ino"] > max_ino:
             max_ino = fields["ino"]
+        # Keep stock PLATFORM first_stage_ramdisk/* untouched (already loaded from Fragment 0)
+        if norm == "first_stage_ramdisk" or norm.startswith("first_stage_ramdisk/"):
+            skipped_first_stage += 1
+            continue
         is_dir = (fields["mode"] & 0o170000) == 0o040000
         sha = hashlib.sha256(content).hexdigest()
         if not is_dir and norm in s0_map and s0_map[norm] == (fields["mode"], sha):
@@ -192,7 +221,7 @@ def repack_v4_two_fragment(
         emitted_paths.add(norm)
         kept_entries += 1
 
-    # Add masks for conflicting stock PLATFORM recovery .rc & vintf xml files
+    # Mask conflicting stock PLATFORM recovery .rc & vintf xml files in Fragment 1 only
     masked_added = 0
     for mask_map in (MASKED_RC_FILES, MASKED_VINTF_FILES):
         for mpath, mcontent in mask_map.items():
@@ -213,27 +242,15 @@ def repack_v4_two_fragment(
                 out_cpio.extend(build_cpio_entry(mpath, mfields, mcontent))
                 masked_added += 1
 
-    # Append CPIO TRAILER!!!
     trailer_fields = {
-        "ino": 0,
-        "mode": 0,
-        "uid": 0,
-        "gid": 0,
-        "nlink": 1,
-        "mtime": 0,
-        "devmajor": 0,
-        "devminor": 0,
-        "rdevmajor": 0,
-        "rdevminor": 0,
+        "ino": 0, "mode": 0, "uid": 0, "gid": 0, "nlink": 1, "mtime": 0,
+        "devmajor": 0, "devminor": 0, "rdevmajor": 0, "rdevminor": 0,
     }
     out_cpio.extend(build_cpio_entry("TRAILER!!!", trailer_fields, b""))
-    # Pad CPIO stream to 512-byte boundary
     raw_recovery_cpio = pad_to(bytes(out_cpio), 512)
 
-    # Compress Fragment 1 (RECOVERY) with LZ4HC legacy
-    recovery_f1_compressed = compress_lz4_legacy(raw_recovery_cpio, lz4_bin=lz4_bin, level=lz4_level)
+    recovery_f1_compressed = compress_fragment(raw_recovery_cpio, codec=codec, level=level)
 
-    # Assemble vendor_boot v4 image
     combined_ramdisk = stock_f0_compressed + recovery_f1_compressed
     total_ramdisk_sz = len(combined_ramdisk)
 
@@ -246,9 +263,7 @@ def repack_v4_two_fragment(
         + f1_board_id_raw
     )
     table_bytes = table_entry_0 + table_entry_1
-    assert len(table_entry_0) == 108 and len(table_entry_1) == 108
 
-    # Construct 2128-byte v4 header
     header = bytearray()
     header.extend(b"VNDRBOOT")
     header.extend(struct.pack("<IIIII", 4, page_size, kaddr, raddr, total_ramdisk_sz))
@@ -273,9 +288,7 @@ def repack_v4_two_fragment(
             f"Repacked image ({payload_size:,} B) exceeds partition size ({partition_size:,} B) by {payload_size - partition_size:,} B!"
         )
 
-    # Pad to exact 64 MiB partition size (or leave unpadded? fastboot accepts <= 64MiB, padding matches stock/mkbootimg)
     image.extend(b"\x00" * (partition_size - payload_size))
-
     os.makedirs(os.path.dirname(os.path.abspath(out_img)), exist_ok=True)
     with open(out_img, "wb") as f:
         f.write(image)
@@ -283,6 +296,7 @@ def repack_v4_two_fragment(
     return {
         "out_img": out_img,
         "out_sha256": hashlib.sha256(image).hexdigest(),
+        "codec": f"{codec}-{level}",
         "payload_size": payload_size,
         "partition_size": partition_size,
         "free_bytes": partition_size - payload_size,
@@ -291,16 +305,17 @@ def repack_v4_two_fragment(
         "f1_recovery_compressed": len(recovery_f1_compressed),
         "kept_entries": kept_entries,
         "skipped_identical": skipped_identical,
+        "skipped_first_stage": skipped_first_stage,
         "masked_added": masked_added,
     }
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 4:
-        print("Usage: repack_vendor_boot_v4.py <stock.img> <built.img> <out.img> [lz4_bin] [level]")
+        print("Usage: repack_vendor_boot_v4.py <stock.img> <built.img> <out.img> [codec] [level]")
         sys.exit(2)
-    lz4_b = sys.argv[4] if len(sys.argv) > 4 else "lz4"
-    lvl = int(sys.argv[5]) if len(sys.argv) > 5 else 12
-    res = repack_v4_two_fragment(sys.argv[1], sys.argv[2], sys.argv[3], lz4_bin=lz4_b, lz4_level=lvl)
+    codec = sys.argv[4] if len(sys.argv) > 4 else "zstd"
+    lvl = int(sys.argv[5]) if len(sys.argv) > 5 else 19
+    res = repack_v4_two_fragment(sys.argv[1], sys.argv[2], sys.argv[3], codec=codec, level=lvl)
     for k, v in res.items():
         print(f"{k}: {v}")

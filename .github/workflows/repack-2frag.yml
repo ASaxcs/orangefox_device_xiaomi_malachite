@@ -18,10 +18,10 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install lz4 & cpio
+      - name: Install lz4, zstd & cpio
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends lz4 cpio
+          sudo apt-get install -y --no-install-recommends lz4 zstd cpio
 
       - name: Download built OrangeFox vendor_boot.img & extract stock OS3.0.303.0.WOOIDXM vendor_boot.img
         env:
@@ -44,13 +44,13 @@ jobs:
             "https://cdnorg.d.miui.com/OS3.0.303.0.WOOIDXM/malachite_id_global-ota_full-OS3.0.303.0.WOOIDXM-user-16.0-7fdae8050e.zip"
           echo "d38ed79631c06d37389c3760598e17fcad4b82b509f3fa16423749494723295d  /tmp/v4/stock/vendor_boot.img" | sha256sum -c -
 
-      - name: Repack into 2-fragment vendor_boot v4 (Stock PLATFORM + OrangeFox RECOVERY)
+      - name: Repack into 2-fragment vendor_boot v4 (Stock PLATFORM LZ4 + OrangeFox RECOVERY ZSTD)
         run: |
           python3 scripts/repack_vendor_boot_v4.py \
             /tmp/v4/stock/vendor_boot.img \
             /tmp/v4/built/vendor_boot.img \
             /tmp/v4/out/vendor_boot_2frag.img \
-            lz4 12
+            zstd 19
 
       - name: Verify 2-fragment image & run compare_ramdisks.py
         run: |

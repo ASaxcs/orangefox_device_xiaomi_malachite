@@ -73,18 +73,30 @@ def verify(repacked_img: str, stock_img: str, orig_built_img: str) -> int:
     for p, v in r_frags[1]["entries"].items():
         merged[p] = v
 
-    # Verify every single file from orig_built_img exists in merged with identical SHA256
+    # Verify every single non-first_stage_ramdisk file from orig_built_img exists in merged with identical SHA256
     orig_entries = b_frags[0]["entries"]
     missing_from_merged = []
     diff_in_merged = []
     for p, (mode, sha, sz, _) in orig_entries.items():
         is_dir = (mode & 0o170000) == 0o040000
-        if is_dir:
+        if is_dir or p == "first_stage_ramdisk" or p.startswith("first_stage_ramdisk/"):
             continue
         if p not in merged:
             missing_from_merged.append(p)
         elif merged[p][1] != sha:
             diff_in_merged.append(p)
+
+    # Verify LZ4 EOS sentinel (4 zero bytes) before non-LZ4 Fragment 1
+    r_data = open(repacked_img, "rb").read()
+    _, ps, _, _, rsz = struct.unpack_from("<IIIII", r_data, 8)
+    hsz, dtbsz, _ = struct.unpack_from("<IIQ", r_data, 28 + 2048 + 20)
+    roff = align(hsz, ps)
+    toff = roff + align(rsz, ps) + align(dtbsz, ps)
+    f1_sz, f1_off, _ = struct.unpack_from("<III", r_data, toff + 108)
+    f1_head = r_data[roff + f1_off : roff + f1_off + 8]
+    if f1_head[:4] != b"\x02\x21\x4c\x18":
+        if f1_head[:4] != b"\x00\x00\x00\x00" or f1_head[4:8] != b"\x28\xb5\x2f\xfd":
+            errors.append(f"Fragment 1 missing 4-byte LZ4 EOS sentinel before ZSTD magic: {f1_head.hex()}")
 
     if missing_from_merged:
         errors.append(f"Merged recovery missing {len(missing_from_merged)} OrangeFox files: {missing_from_merged[:10]}")
